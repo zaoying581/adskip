@@ -1,0 +1,26 @@
+name: publish
+on: workflow_dispatch
+permissions:
+  contents: write
+  actions: read
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: AdSkip-apk
+          run-id: 43557402451
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: dl
+      - name: commit
+        run: |
+          ls -lR dl
+          mkdir -p apk
+          cp dl/app-debug.apk apk/app-debug.apk
+          git config user.name gh
+          git config user.email gh@users.noreply.github.com
+          git add apk/app-debug.apk
+          git commit -m "publish apk [skip ci]"
+          git push
