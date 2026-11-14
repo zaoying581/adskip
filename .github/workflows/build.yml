@@ -1,0 +1,315 @@
+name: build-apk
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: write-sources
+        run: |
+          mkdir -p app/src/main/java/com/yg/adskip/hook app/src/main/assets .github/workflows
+
+          cat > settings.gradle <<'GEN'
+          pluginManagement {
+              repositories { google(); mavenCentral(); gradlePluginPortal() }
+          }
+          dependencyResolutionManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  maven { url 'https://api.xposed.info/' }
+              }
+          }
+          rootProject.name = "adskip"
+          include ':app'
+          GEN
+
+          cat > build.gradle <<'GEN'
+          plugins { id 'com.android.application' version '8.5.2' apply false }
+          GEN
+
+          cat > gradle.properties <<'GEN'
+          org.gradle.jvmargs=-Xmx2g
+          GEN
+
+          cat > app/build.gradle <<'GEN'
+          plugins { id 'com.android.application' }
+
+          android {
+              namespace 'com.yg.adskip'
+              compileSdk 34
+              defaultConfig {
+                  applicationId "com.yg.adskip"
+                  minSdk 27
+                  targetSdk 34
+                  versionCode 1
+                  versionName "1.0"
+              }
+              buildTypes {
+                  release { minifyEnabled false; signingConfig signingConfigs.debug }
+              }
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_11
+                  targetCompatibility JavaVersion.VERSION_11
+              }
+          }
+
+          dependencies {
+              compileOnly 'de.robv.android.xposed:api:82'
+          }
+          GEN
+
+          cat > app/src/main/AndroidManifest.xml <<'GEN'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <application android:label="AdSkip" android:hasCode="true">
+                  <meta-data android:name="xposedmodule"      android:value="true" />
+                  <meta-data android:name="xposeddescription" android:value="激励广告直结：不播广告直接发奖" />
+                  <meta-data android:name="xposedminversion"  android:value="93" />
+              </application>
+          </manifest>
+          GEN
+
+          printf 'com.yg.adskip.hook.Reward' > app/src/main/assets/xposed_init
+
+          cat > app/src/main/java/com/yg/adskip/hook/Reward.java <<'GEN'
+          package com.yg.adskip.hook;
+
+          import android.os.Bundle;
+          import android.os.Handler;
+          import android.os.Looper;
+
+          import java.lang.reflect.Proxy;
+          import java.util.Map;
+          import java.util.WeakHashMap;
+
+          import de.robv.android.xposed.IXposedHookLoadPackage;
+          import de.robv.android.xposed.XC_MethodHook;
+          import de.robv.android.xposed.XposedBridge;
+          import de.robv.android.xposed.XposedHelpers;
+          import de.robv.android.xposed.callbacks.XC_LoadPackage;
+
+          public final class Reward implements IXposedHookLoadPackage {
+
+              private static final boolean SWALLOW_AD = true;
+              private static final int     AMOUNT     = 1;
+              private static final String  LABEL      = "reward";
+              private static final long    DELAY      = 2000L;
+
+              private static final Handler UI = new Handler(Looper.getMainLooper());
+              private static final Map<Object, Object> L = new WeakHashMap<>();
+              private static ClassLoader cl;
+
+              @Override public void handleLoadPackage(XC_LoadPackage.LoadPackageParam lp) {
+                  cl = lp.classLoader;
+                  log("injected into " + lp.packageName);
+                  admob(); applovin(); unity(); pangle(); ironsource();
+              }
+
+              private static void log(String s) { XposedBridge.log("[AdSkip] " + s); }
+
+              private static void later(Runnable r) {
+                  if (SWALLOW_AD) UI.postDelayed(r, DELAY); else UI.post(r);
+              }
+
+              private static void call(Object target, String method, Object... args) {
+                  try { XposedHelpers.callMethod(target, method, args); }
+                  catch (Throwable t) { log("call " + method + " -> " + t); }
+              }
+
+              private static void admob() {
+                  try {
+                      Class<?> ad = XposedHelpers.findClass(
+                              "com.google.android.gms.ads.rewarded.RewardedAd", cl);
+                      final Class<?> itemCls = XposedHelpers.findClass(
+                              "com.google.android.gms.ads.rewarded.RewardItem", cl);
+
+                      XposedBridge.hookAllMethods(ad, "show", new XC_MethodHook() {
+                          @Override protected void beforeHookedMethod(MethodHookParam p) {
+                              Object listener = null;
+                              for (Object a : p.args) {
+                                  if (a != null && a.getClass().getName().endsWith("OnUserEarnedRewardListener"))
+                                      listener = a;
+                              }
+                              if (listener == null) return;
+                              final Object l = listener;
+                              if (SWALLOW_AD) p.setResult(null);
+                              later(() -> {
+                                  try {
+                                      final Object item = Proxy.newProxyInstance(cl,
+                                              new Class[]{itemCls}, (px, m, a) ->
+                                                      m.getName().equals("getType")   ? LABEL
+                                                    : m.getName().equals("getAmount") ? (Object) AMOUNT
+                                                    : null);
+                                      call(l, "onUserEarnedReward", item);
+                                      log("admob rewarded");
+                                  } catch (Throwable t) { log("admob " + t); }
+                              });
+                          }
+                      });
+                      log("admob hooked");
+                  } catch (Throwable ignored) { }
+              }
+
+              private static void applovin() {
+                  try {
+                      Class<?> max = XposedHelpers.findClass(
+                              "com.applovin.mediation.ads.MaxRewardedAd", cl);
+                      final Class<?> rewardCls = XposedHelpers.findClass(
+                              "com.applovin.mediation.MaxReward", cl);
+
+                      XposedBridge.hookAllMethods(max, "setListener", new XC_MethodHook() {
+                          @Override protected void beforeHookedMethod(MethodHookParam p) {
+                              if (p.args.length > 0 && p.args[0] != null) L.put(p.thisObject, p.args[0]);
+                          }
+                      });
+
+                      XposedBridge.hookAllMethods(max, "showAd", new XC_MethodHook() {
+                          @Override protected void beforeHookedMethod(MethodHookParam p) {
+                              final Object l = L.get(p.thisObject);
+                              if (l == null) return;
+                              final Object ad = p.thisObject;
+                              if (SWALLOW_AD) p.setResult(null);
+                              later(() -> {
+                                  try {
+                                      Object r = XposedHelpers.callStaticMethod(rewardCls, "create", AMOUNT, LABEL);
+                                      call(l, "onUserRewarded", ad, r);
+                                      call(l, "onAdHidden", ad);
+                                      log("max rewarded");
+                                  } catch (Throwable t) { log("max " + t); }
+                              });
+                          }
+                      });
+                      log("applovin hooked");
+                  } catch (Throwable ignored) { }
+              }
+
+              private static void unity() {
+                  try {
+                      Class<?> u = XposedHelpers.findClass("com.unity3d.ads.UnityAds", cl);
+                      Class<?> st = XposedHelpers.findClass(
+                              "com.unity3d.ads.UnityAds$UnityAdsShowCompletionState", cl);
+                      final Object done = XposedHelpers.getStaticObjectField(st, "COMPLETED");
+
+                      XposedBridge.hookAllMethods(u, "show", new XC_MethodHook() {
+                          @Override protected void beforeHookedMethod(MethodHookParam p) {
+                              String placement = null;
+                              Object listener = null;
+                              for (Object a : p.args) {
+                                  if (a instanceof String) placement = (String) a;
+                                  else if (a != null && a.getClass().getName().contains("ShowListener")) listener = a;
+                              }
+                              if (listener == null) return;
+                              final String pl = placement;
+                              final Object l = listener;
+                              if (SWALLOW_AD) p.setResult(null);
+                              later(() -> { call(l, "onUnityAdsShowComplete", pl, done); log("unity rewarded"); });
+                          }
+                      });
+                      log("unity hooked");
+                  } catch (Throwable ignored) { }
+              }
+
+              private static void pangle() {
+                  try {
+                      Class<?> nativeAd = XposedHelpers.findClass(
+                              "com.bytedance.sdk.openadsdk.TTAdNative", cl);
+
+                      XposedBridge.hookAllMethods(nativeAd, "loadRewardVideoAd", new XC_MethodHook() {
+                          @Override protected void beforeHookedMethod(MethodHookParam p) {
+                              for (Object a : p.args) {
+                                  if (a != null && a.getClass().getName().contains("RewardVideoAdListener"))
+                                      L.put("pangle", a);
+                              }
+                          }
+                      });
+
+                      Class<?> tt = XposedHelpers.findClass(
+                              "com.bytedance.sdk.openadsdk.TTRewardVideoAd", cl);
+
+                      XposedBridge.hookAllMethods(tt, "showRewardVideoAd", new XC_MethodHook() {
+                          @Override protected void beforeHookedMethod(MethodHookParam p) {
+                              final Object l = L.get("pangle");
+                              if (l == null) return;
+                              if (SWALLOW_AD) p.setResult(null);
+                              later(() -> {
+                                  call(l, "onRewardVerify", true, AMOUNT, LABEL, 0, "");
+                                  call(l, "onRewardArrived", true, AMOUNT, new Bundle());
+                                  log("pangle rewarded");
+                              });
+                          }
+                      });
+                      log("pangle hooked");
+                  } catch (Throwable ignored) { }
+              }
+
+              private static void ironsource() {
+                  try {
+                      Class<?> is = XposedHelpers.findClass(
+                              "com.ironsource.mediationsdk.IronSource", cl);
+
+                      XposedBridge.hookAllMethods(is, "setRewardedVideoListener", new XC_MethodHook() {
+                          @Override protected void beforeHookedMethod(MethodHookParam p) {
+                              if (p.args.length > 0 && p.args[0] != null) L.put("is", p.args[0]);
+                          }
+                      });
+
+                      XposedBridge.hookAllMethods(is, "showRewardedVideo", new XC_MethodHook() {
+                          @Override protected void beforeHookedMethod(MethodHookParam p) {
+                              final Object l = L.get("is");
+                              if (l == null) return;
+                              if (SWALLOW_AD) p.setResult(null);
+                              later(() -> {
+                                  try { XposedHelpers.callMethod(l, "onAdRewarded"); }
+                                  catch (Throwable t) {
+                                      try {
+                                          Class<?> info = XposedHelpers.findClass(
+                                                  "com.ironsource.mediationsdk.adunit.adapter.utility.AdInfo", cl);
+                                          XposedHelpers.callMethod(l, "onAdRewarded",
+                                                  XposedHelpers.newInstance(info, "rewarded"));
+                                      } catch (Throwable t2) { log("is " + t2); }
+                                  }
+                                  log("ironsource rewarded");
+                              });
+                          }
+                      });
+                      log("ironsource hooked");
+                  } catch (Throwable ignored) { }
+              }
+          }
+          GEN
+
+          echo "---- sources written ----"
+          find . -name '*.java' -o -name '*.gradle' -o -name 'AndroidManifest.xml' | sort
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: android-actions/setup-android@v3
+
+      - name: sdk-components
+        run: |
+          yes | sdkmanager --licenses > /dev/null || true
+          sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0"
+
+      - uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: '8.7'
+
+      - name: build
+        run: gradle assembleDebug --no-daemon --stacktrace
+
+      - name: show-apk
+        run: ls -lh app/build/outputs/apk/debug/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: AdSkip-apk
+          path: app/build/outputs/apk/debug/*.apk
